@@ -4,8 +4,9 @@
 #include <thread.h>
 
 enum{
-	stacksize = 4096,
+	stacksize = 8092,
 };
+int mainstacksize = stacksize;
 
 uchar*	buf;
 
@@ -18,7 +19,7 @@ ulong	max;
 long	ssize;
 vlong	tsize;
 int	dsize;
-int	done;
+int	done, indone, outdone;
 int	ibsize;
 int	obsize;
 int	verb;
@@ -92,10 +93,11 @@ threadmain(int argc, char *argv[])
 	nin = 0;
 	nout = 0;
 	done = 0;
+	indone = 0;
+	outdone = 0;
 	max = 0;
 
-	// TODO - dup() file descriptors, use pipe()?
-	pid = proccreate(dooutput, fo, stacksize);
+	pid = threadcreate(dooutput, fo, stacksize);
 	if(pid < 0)
 		sysfatal("could not spawn thread for output: %r");
 		
@@ -109,8 +111,7 @@ threadmain(int argc, char *argv[])
 			break;
 		}
 
-		// TODO - dup() file descriptors, use pipe()?
-		pid = proccreate(doinput, f, stacksize);
+		pid = threadcreate(doinput, f, stacksize);
 		if(pid < 0)
 			sysfatal("could not spawn thread for input: %r");
 
@@ -123,10 +124,14 @@ threadmain(int argc, char *argv[])
 		f = emalloc(1 * sizeof(int));
 		*f = 0;
 
-		// TODO - dup() file descriptors, use pipe()?
-		pid = proccreate(doinput, f, stacksize);
+		pid = threadcreate(doinput, f, stacksize);
 		if(pid < 0)
 			sysfatal("could not spawn thread for stdin: %r");
+	}
+
+	// Wait for the workers to finish
+	while(!indone && !outdone){
+		sleep(dsize);
 	}
 
 	done = 1;
@@ -156,13 +161,22 @@ dooutput(void *vp)
 
 	lock(&arithlock);
 	for (;;) {
+		fprint(2, "DEBUG dooutput for(;;) tick\n");
+
 		n = nin - nout;
 		if(n == 0) {
-			if(done)
+			if(done){
+				fprint(2, "DEBUG dooutput saw done\n");
+			
 				break;
+			}
 			sleepunlocked(dsize);
+			outdone = 1;
 			continue;
 		}
+		
+		outdone = 0;
+		
 		if(verb && n > max) {
 			fprint(2, "n = %ld\n", n);
 			max = n;
@@ -188,6 +202,10 @@ dooutput(void *vp)
 		}
 	}
 	unlock(&arithlock);
+	
+	outdone = 1;
+	
+	fprint(2, "DEBUG dooutput() ended\n");
 }
 
 void
@@ -202,6 +220,8 @@ doinput(void *vp)
 	lock(&arithlock);
 	if(ssize > 0) {
 		for (xnin = 0; xnin < ssize && !done; xnin += c) {
+			fprint(2, "DEBUG doinput for() tick\n");
+
 			n = kilo - (xnin - nout);
 			if(n == 0)
 				break;
@@ -223,12 +243,19 @@ doinput(void *vp)
 		}
 		nin = xnin;
 	}
+
 	while(!done) {
+		fprint(2, "DEBUG looped doinput's while()\n");
+	
 		n = kilo - (nin - nout);
 		if(n == 0) {
 			sleepunlocked(0);
+			indone = 1;
 			continue;
 		}
+		
+		indone = 0;
+		
 		l = nin % kilo;
 		unlock(&arithlock);
 
@@ -247,6 +274,10 @@ doinput(void *vp)
 		nin += c;
 	}
 	unlock(&arithlock);
+	
+	indone = 1;
+
+	fprint(2, "DEBUG doinput() ended\n");
 }
 
 // From BurnZeZ
